@@ -9,8 +9,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     id TEXT PRIMARY KEY,
     repo TEXT,
     branch TEXT,
+    commit_sha TEXT,
     started_at TEXT NOT NULL,
-    ended_at TEXT,
     cwd TEXT
 );
 
@@ -41,8 +41,9 @@ pub struct Session {
     pub id: String,
     pub repo: Option<String>,
     pub branch: Option<String>,
+    pub commit_sha: Option<String>,
     pub started_at: String,
-    pub ended_at: Option<String>,
+    pub last_log_at: Option<String>,
     pub cwd: Option<String>,
     pub log_count: i64,
 }
@@ -52,8 +53,8 @@ pub struct Stats {
     pub session_id: String,
     pub repo: Option<String>,
     pub branch: Option<String>,
+    pub commit_sha: Option<String>,
     pub started_at: String,
-    pub ended_at: Option<String>,
     pub total_lines: i64,
     pub first_log: Option<String>,
     pub last_log: Option<String>,
@@ -81,10 +82,20 @@ pub struct SearchFilters {
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: u32,
+    pub is_regex: bool,
+}
+
+pub struct LogsFilters {
+    pub session_id: Option<String>,
+    pub branch: Option<String>,
+    pub since: Option<String>,
+    pub limit: u32,
+    pub offset: u32,
 }
 
 pub struct SessionFilters {
     pub branch: Option<String>,
+    pub commit: Option<String>,
     pub since: Option<String>,
     pub limit: u32,
 }
@@ -114,21 +125,13 @@ pub fn create_session(
     id: &str,
     repo: Option<&str>,
     branch: Option<&str>,
+    commit_sha: Option<&str>,
     cwd: Option<&str>,
 ) -> rusqlite::Result<()> {
     let now = Utc::now().to_rfc3339();
     conn.execute(
-        "INSERT INTO sessions (id, repo, branch, started_at, cwd) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, repo, branch, now, cwd],
-    )?;
-    Ok(())
-}
-
-pub fn end_session(conn: &Connection, id: &str) -> rusqlite::Result<()> {
-    let now = Utc::now().to_rfc3339();
-    conn.execute(
-        "UPDATE sessions SET ended_at = ?1 WHERE id = ?2",
-        params![now, id],
+        "INSERT INTO sessions (id, repo, branch, commit_sha, started_at, cwd) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, repo, branch, commit_sha, now, cwd],
     )?;
     Ok(())
 }
@@ -175,13 +178,70 @@ fn parse_since(since: &str) -> Option<String> {
     Some(ts.to_rfc3339())
 }
 
-pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) -> Vec<LogEntry> {
-    let re = match Regex::new(pattern) {
-        Ok(r) => r,
+pub fn list_logs(conn: &Connection, filters: &LogsFilters) -> Vec<LogEntry> {
+    let mut sql = String::from(
+        "SELECT l.id, l.session_id, l.timestamp, l.line, s.branch \
+         FROM logs l JOIN sessions s ON l.session_id = s.id WHERE 1=1",
+    );
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+
+    if let Some(ref session_id) = filters.session_id {
+        sql.push_str(" AND l.session_id = ?");
+        param_values.push(Box::new(session_id.clone()));
+    }
+    if let Some(ref branch) = filters.branch {
+        sql.push_str(" AND s.branch = ?");
+        param_values.push(Box::new(branch.clone()));
+    }
+    if let Some(ref since) = filters.since {
+        if let Some(ts) = parse_since(since) {
+            sql.push_str(" AND l.timestamp >= ?");
+            param_values.push(Box::new(ts));
+        }
+    }
+
+    sql.push_str(" ORDER BY l.timestamp DESC");
+    sql.push_str(&format!(" LIMIT {} OFFSET {}", filters.limit, filters.offset));
+
+    let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(s) => s,
         Err(e) => {
-            eprintln!("Invalid regex pattern: {}", e);
+            eprintln!("SQL error: {}", e);
             return vec![];
         }
+    };
+
+    stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(LogEntry {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            timestamp: row.get(2)?,
+            line: row.get(3)?,
+            branch: row.get(4)?,
+        })
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("Query error: {}", e);
+        panic!("Query failed");
+    })
+    .filter_map(|r| r.ok())
+    .collect()
+}
+
+pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) -> Vec<LogEntry> {
+    let re = if filters.is_regex {
+        match Regex::new(pattern) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("Invalid regex pattern: {}", e);
+                return vec![];
+            }
+        }
+    } else {
+        // Plain text search — escape to literal regex
+        Regex::new(&regex::escape(pattern)).unwrap()
     };
 
     let mut sql = String::from(
@@ -256,7 +316,9 @@ pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) ->
 
 pub fn list_sessions(conn: &Connection, filters: &SessionFilters) -> Vec<Session> {
     let mut sql = String::from(
-        "SELECT s.id, s.repo, s.branch, s.started_at, s.ended_at, s.cwd, \
+        "SELECT s.id, s.repo, s.branch, s.commit_sha, s.started_at, \
+         (SELECT MAX(timestamp) FROM logs WHERE session_id = s.id) as last_log_at, \
+         s.cwd, \
          (SELECT COUNT(*) FROM logs WHERE session_id = s.id) as log_count \
          FROM sessions s WHERE 1=1",
     );
@@ -265,6 +327,10 @@ pub fn list_sessions(conn: &Connection, filters: &SessionFilters) -> Vec<Session
     if let Some(ref branch) = filters.branch {
         sql.push_str(" AND s.branch = ?");
         param_values.push(Box::new(branch.clone()));
+    }
+    if let Some(ref commit) = filters.commit {
+        sql.push_str(" AND s.commit_sha LIKE ?");
+        param_values.push(Box::new(format!("{}%", commit)));
     }
     if let Some(ref since) = filters.since {
         if let Some(ts) = parse_since(since) {
@@ -284,10 +350,11 @@ pub fn list_sessions(conn: &Connection, filters: &SessionFilters) -> Vec<Session
             id: row.get(0)?,
             repo: row.get(1)?,
             branch: row.get(2)?,
-            started_at: row.get(3)?,
-            ended_at: row.get(4)?,
-            cwd: row.get(5)?,
-            log_count: row.get(6)?,
+            commit_sha: row.get(3)?,
+            started_at: row.get(4)?,
+            last_log_at: row.get(5)?,
+            cwd: row.get(6)?,
+            log_count: row.get(7)?,
         })
     })
     .expect("Failed to query sessions")
@@ -308,9 +375,9 @@ pub fn session_stats(conn: &Connection, session_id: Option<&str>) -> Option<Stat
         .ok()?
     };
 
-    let session: (Option<String>, Option<String>, String, Option<String>) = conn
+    let session: (Option<String>, Option<String>, Option<String>, String) = conn
         .query_row(
-            "SELECT repo, branch, started_at, ended_at FROM sessions WHERE id = ?1",
+            "SELECT repo, branch, commit_sha, started_at FROM sessions WHERE id = ?1",
             params![sid],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
@@ -344,8 +411,8 @@ pub fn session_stats(conn: &Connection, session_id: Option<&str>) -> Option<Stat
         session_id: sid,
         repo: session.0,
         branch: session.1,
-        started_at: session.2,
-        ended_at: session.3,
+        commit_sha: session.2,
+        started_at: session.3,
         total_lines,
         first_log,
         last_log,
@@ -357,8 +424,15 @@ pub fn compare_sessions(
     session_a: &str,
     session_b: &str,
     pattern: Option<&str>,
+    is_regex: bool,
 ) -> Option<CompareResult> {
-    let re = pattern.map(|p| Regex::new(p).ok()).flatten();
+    let re = pattern.map(|p| {
+        if is_regex {
+            Regex::new(p).unwrap_or_else(|_| Regex::new(&regex::escape(p)).unwrap())
+        } else {
+            Regex::new(&regex::escape(p)).unwrap()
+        }
+    });
 
     let get_info = |sid: &str| -> Option<CompareSessionInfo> {
         let (branch, total): (Option<String>, i64) = conn

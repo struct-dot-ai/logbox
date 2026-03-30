@@ -3,6 +3,7 @@ use crate::git;
 use chrono::Utc;
 use rusqlite::Connection;
 use std::io::{self, BufRead, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -34,6 +35,18 @@ pub fn run(session_id: &str, quiet: bool) -> io::Result<()> {
         Condvar::new(),
     ));
 
+    // First Ctrl+C: swallow it, keep reading stdin so we capture shutdown logs.
+    // Second Ctrl+C: force exit immediately.
+    let sigint_count = Arc::new(AtomicUsize::new(0));
+    let sigint_count_clone = Arc::clone(&sigint_count);
+    ctrlc::set_handler(move || {
+        let count = sigint_count_clone.fetch_add(1, Ordering::SeqCst);
+        if count >= 1 {
+            std::process::exit(1);
+        }
+    })
+    .expect("Failed to set Ctrl+C handler");
+
     // Background flush thread
     let flush_shared = Arc::clone(&shared);
     let flush_session_id = session_id.to_string();
@@ -44,7 +57,6 @@ pub fn run(session_id: &str, quiet: bool) -> io::Result<()> {
         loop {
             let mut buf = lock.lock().unwrap();
 
-            // Wait until there's data to flush or we're done, with a timeout
             let result = cvar
                 .wait_timeout_while(buf, FLUSH_INTERVAL, |b| b.lines.is_empty() && !b.done)
                 .unwrap();
@@ -73,13 +85,12 @@ pub fn run(session_id: &str, quiet: bool) -> io::Result<()> {
     for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
-            Err(_) => break,
+            Err(_) => break, // EOF or error — upstream closed
         };
 
         if !quiet {
-            if writeln!(stdout, "{}", line).is_err() {
-                break;
-            }
+            // Ignore broken pipe on stdout (downstream consumer may have closed)
+            let _ = writeln!(stdout, "{}", line);
         }
 
         let timestamp = Utc::now().to_rfc3339();
@@ -107,6 +118,7 @@ pub fn start(quiet: bool, cwd: Option<String>) -> io::Result<()> {
     let session_id = uuid::Uuid::new_v4().to_string();
     let repo = git::repo_name();
     let branch = git::current_branch();
+    let commit_sha = git::head_sha();
     let work_dir = cwd.or_else(|| git::repo_root()).or_else(|| {
         std::env::current_dir()
             .ok()
@@ -118,13 +130,17 @@ pub fn start(quiet: bool, cwd: Option<String>) -> io::Result<()> {
         &session_id,
         repo.as_deref(),
         branch.as_deref(),
+        commit_sha.as_deref(),
         work_dir.as_deref(),
     )
     .expect("Failed to create session");
 
+    // Cyan bold for "logbox", dim for details
+    eprintln!("\x1b[1;36m📦 logbox\x1b[0m recording → session \x1b[2m{}\x1b[0m", &session_id[..8]);
+
     let result = run(&session_id, quiet);
 
-    db::end_session(&conn, &session_id).expect("Failed to end session");
+    eprintln!("\x1b[1;36m📦 logbox\x1b[0m session \x1b[2m{}\x1b[0m ended", &session_id[..8]);
 
     result
 }

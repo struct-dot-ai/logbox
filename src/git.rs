@@ -18,6 +18,24 @@ pub fn current_branch() -> Option<String> {
     }
 }
 
+pub fn head_sha() -> Option<String> {
+    let output = Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()?;
+
+    if output.status.success() {
+        let sha = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if sha.is_empty() {
+            None
+        } else {
+            Some(sha)
+        }
+    } else {
+        None
+    }
+}
+
 /// Extract the repo name from the git remote origin URL, or fall back to the directory name.
 pub fn repo_name() -> Option<String> {
     // Try to get the remote origin URL
