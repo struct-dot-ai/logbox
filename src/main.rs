@@ -1,11 +1,12 @@
 mod collector;
 mod db;
 mod git;
+mod server;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "logbox", about = "Dev log black box — capture and query dev server logs")]
+#[command(name = "logbox", about = "Persist dev server logs to SQLite so AI coding agents can search and query them. Pipe your dev server through `logbox collect`, then agents can use search/sessions/stats/compare to investigate issues.")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -30,6 +31,10 @@ enum Commands {
         #[arg(long)]
         branch: Option<String>,
 
+        /// Filter by commit SHA (prefix match)
+        #[arg(long)]
+        commit: Option<String>,
+
         /// Only sessions started after this time (e.g. "1h", "30m", "2d", or ISO 8601)
         #[arg(long)]
         since: Option<String>,
@@ -43,10 +48,41 @@ enum Commands {
         json: bool,
     },
 
-    /// Search logs by regex pattern
+    /// Show recent logs (newest first, paginate with --offset)
+    Logs {
+        /// Filter to a specific session ID
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Filter by git branch
+        #[arg(long)]
+        branch: Option<String>,
+
+        /// Only logs after this time (e.g. "1h", "30m", "2d")
+        #[arg(long)]
+        since: Option<String>,
+
+        /// Maximum number of results
+        #[arg(long, default_value = "50")]
+        limit: u32,
+
+        /// Skip this many results (for pagination)
+        #[arg(long, default_value = "0")]
+        offset: u32,
+
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Search logs by keyword or pattern
     Search {
-        /// Regex pattern to search for
+        /// Text to search for (plain text by default, use --regex for regex)
         pattern: String,
+
+        /// Treat pattern as a regular expression
+        #[arg(long)]
+        regex: bool,
 
         /// Filter to logs from the last duration (e.g. "1h", "30m", "2d")
         #[arg(long)]
@@ -87,14 +123,21 @@ enum Commands {
         /// Second session ID
         session_b: String,
 
-        /// Filter to lines matching this regex pattern
+        /// Filter to lines matching this pattern
         #[arg(long)]
         pattern: Option<String>,
+
+        /// Treat pattern as a regular expression
+        #[arg(long)]
+        regex: bool,
 
         /// Output as JSON
         #[arg(long)]
         json: bool,
     },
+
+    /// Start MCP server for AI coding agents
+    Serve,
 }
 
 fn main() {
@@ -108,8 +151,51 @@ fn main() {
             }
         }
 
+        Commands::Logs {
+            session,
+            branch,
+            since,
+            limit,
+            offset,
+            json,
+        } => {
+            let conn = db::open_db().expect("Failed to open database");
+            let results = db::list_logs(
+                &conn,
+                &db::LogsFilters {
+                    session_id: session,
+                    branch,
+                    since,
+                    limit,
+                    offset,
+                },
+            );
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&results).unwrap());
+            } else if results.is_empty() {
+                println!("No logs found.");
+            } else {
+                for entry in &results {
+                    let branch_str = entry
+                        .branch
+                        .as_deref()
+                        .map(|b| format!(" [{}]", b))
+                        .unwrap_or_default();
+                    println!(
+                        "{} {}{}  {}",
+                        &entry.session_id[..8],
+                        entry.timestamp,
+                        branch_str,
+                        entry.line,
+                    );
+                }
+            }
+        }
+
         Commands::Sessions {
             branch,
+            commit,
             since,
             limit,
             json,
@@ -119,6 +205,7 @@ fn main() {
                 &conn,
                 &db::SessionFilters {
                     branch,
+                    commit,
                     since,
                     limit,
                 },
@@ -132,16 +219,17 @@ fn main() {
                 for s in &sessions {
                     let repo_str = s.repo.as_deref().unwrap_or("(no repo)");
                     let branch_str = s.branch.as_deref().unwrap_or("(no branch)");
-                    let ended = s.ended_at.as_deref().unwrap_or("(running)");
+                    let sha_short = s.commit_sha.as_deref().map(|s| &s[..7]).unwrap_or("-------");
+                    let last_log = s.last_log_at.as_deref().unwrap_or("(no logs)");
                     println!(
-                        "{} | {} @ {} | {} → {} | {} lines | {}",
+                        "{} | {} @ {} ({}) | started {} | last log {} | {} lines",
                         &s.id[..8],
                         repo_str,
                         branch_str,
+                        sha_short,
                         s.started_at,
-                        ended,
+                        last_log,
                         s.log_count,
-                        s.cwd.as_deref().unwrap_or(""),
                     );
                 }
             }
@@ -149,6 +237,7 @@ fn main() {
 
         Commands::Search {
             pattern,
+            regex,
             last,
             session,
             branch,
@@ -165,6 +254,7 @@ fn main() {
                     since: last,
                     until: None,
                     limit,
+                    is_regex: regex,
                 },
             );
 
@@ -206,11 +296,11 @@ fn main() {
                             "Branch:     {}",
                             stats.branch.as_deref().unwrap_or("(no branch)")
                         );
-                        println!("Started:    {}", stats.started_at);
                         println!(
-                            "Ended:      {}",
-                            stats.ended_at.as_deref().unwrap_or("(running)")
+                            "Commit:     {}",
+                            stats.commit_sha.as_deref().unwrap_or("(unknown)")
                         );
+                        println!("Started:    {}", stats.started_at);
                         println!("Lines:      {}", stats.total_lines);
                         if let Some(ref first) = stats.first_log {
                             println!("First log:  {}", first);
@@ -231,10 +321,11 @@ fn main() {
             session_a,
             session_b,
             pattern,
+            regex,
             json,
         } => {
             let conn = db::open_db().expect("Failed to open database");
-            match db::compare_sessions(&conn, &session_a, &session_b, pattern.as_deref()) {
+            match db::compare_sessions(&conn, &session_a, &session_b, pattern.as_deref(), regex) {
                 Some(result) => {
                     if json {
                         println!("{}", serde_json::to_string_pretty(&result).unwrap());
@@ -261,6 +352,14 @@ fn main() {
                     eprintln!("One or both sessions not found.");
                     std::process::exit(1);
                 }
+            }
+        }
+
+        Commands::Serve => {
+            let rt = tokio::runtime::Runtime::new().expect("Failed to create tokio runtime");
+            if let Err(e) = rt.block_on(server::run_server()) {
+                eprintln!("logbox: server error: {}", e);
+                std::process::exit(1);
             }
         }
     }
