@@ -89,6 +89,7 @@ pub struct LogsFilters {
     pub session_id: Option<String>,
     pub branch: Option<String>,
     pub since: Option<String>,
+    pub until: Option<String>,
     pub limit: u32,
     pub offset: u32,
 }
@@ -196,6 +197,12 @@ pub fn list_logs(conn: &Connection, filters: &LogsFilters) -> Vec<LogEntry> {
     if let Some(ref since) = filters.since {
         if let Some(ts) = parse_since(since) {
             sql.push_str(" AND l.timestamp >= ?");
+            param_values.push(Box::new(ts));
+        }
+    }
+    if let Some(ref until) = filters.until {
+        if let Some(ts) = parse_since(until) {
+            sql.push_str(" AND l.timestamp <= ?");
             param_values.push(Box::new(ts));
         }
     }

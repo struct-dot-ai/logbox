@@ -69,6 +69,9 @@ pub struct ListLogsRequest {
     #[schemars(description = "Only logs after this time (e.g. '1h', '30m', '2d', or ISO 8601)")]
     pub since: Option<String>,
 
+    #[schemars(description = "Only logs before this time (e.g. '1h', '30m', '2d', or ISO 8601)")]
+    pub until: Option<String>,
+
     #[schemars(description = "Maximum number of results (default 50)")]
     pub limit: Option<u32>,
 
@@ -119,6 +122,7 @@ impl LogboxService {
                 session_id: req.session_id,
                 branch: req.branch,
                 since: req.since,
+                until: req.until,
                 limit: req.limit.unwrap_or(50),
                 offset: req.offset.unwrap_or(0),
             },
