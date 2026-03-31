@@ -62,6 +62,10 @@ enum Commands {
         #[arg(long)]
         since: Option<String>,
 
+        /// Only logs before this time (e.g. "1h", "30m", "2d")
+        #[arg(long)]
+        until: Option<String>,
+
         /// Maximum number of results
         #[arg(long, default_value = "50")]
         limit: u32,
@@ -155,6 +159,7 @@ fn main() {
             session,
             branch,
             since,
+            until,
             limit,
             offset,
             json,
@@ -166,6 +171,7 @@ fn main() {
                     session_id: session,
                     branch,
                     since,
+                    until,
                     limit,
                     offset,
                 },
