@@ -119,7 +119,7 @@ pub fn start(quiet: bool, cwd: Option<String>) -> io::Result<()> {
     let repo = git::repo_name();
     let branch = git::current_branch();
     let commit_sha = git::head_sha();
-    let work_dir = cwd.or_else(|| git::repo_root()).or_else(|| {
+    let work_dir = cwd.or_else(git::repo_root).or_else(|| {
         std::env::current_dir()
             .ok()
             .map(|p| p.to_string_lossy().to_string())
