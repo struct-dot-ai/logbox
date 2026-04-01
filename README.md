@@ -1,18 +1,22 @@
 # logbox
 
-A dev log black box. Captures dev server logs into SQLite so you can search, compare, and query them later.
+Capture dev server logs to SQLite so AI coding agents can search and query them.
 
-Logs get lost in terminal scrollback, disappear on restart, and can't be searched across branches or sessions. logbox fixes that — pipe your dev server through it and every line is stored with timestamps, git branch, and repo info.
+Dev server logs get lost in terminal scrollback, disappear on restart, and can't be searched across branches or sessions. logbox fixes that — pipe your dev server through it and every line is stored with timestamps, git branch, commit SHA, and repo info. Agents can then query the logs via MCP tools or CLI.
 
 ## Install
+
+```bash
+npm install -g @struct-ai/logbox
+```
+
+Or with cargo:
 
 ```bash
 cargo install logbox
 ```
 
-## Usage
-
-### Capture logs
+## Capture logs
 
 Pipe your dev server output through logbox. It stores every line and passes it through to your terminal:
 
@@ -26,66 +30,82 @@ Use `--quiet` to store without terminal output:
 npm run dev 2>&1 | logbox collect --quiet
 ```
 
-### Search logs
+## Browse logs
+
+View recent log lines, newest first. Use time ranges to focus on a window:
 
 ```bash
-# Regex search across all logs
-logbox search "error|panic"
-
-# Filter by time
-logbox search "connection refused" --last 1h
-
-# Filter by branch or session
-logbox search "error" --branch main
-logbox search "error" --session abc12345
-
-# JSON output
-logbox search "error" --json
+logbox logs
+logbox logs --since 1h
+logbox logs --since 2h --until 1h
+logbox logs --session <session-id> --limit 100
+logbox logs --offset 50          # paginate
 ```
 
-### List sessions
+## Search logs
 
-Each time you run `logbox collect`, a new session is created.
+Find log lines matching a keyword (case-insensitive):
+
+```bash
+logbox search "error"
+logbox search "connection refused" --last 1h
+logbox search "404" --branch main
+logbox search "error" --session <session-id>
+```
+
+**Tip:** Use `search` to find a specific event, then `logs --since/--until` around that timestamp to see context.
+
+## Sessions
+
+Each `logbox collect` invocation creates a session tagged with git repo, branch, and commit SHA:
 
 ```bash
 logbox sessions
 logbox sessions --branch feature/auth --since 2d
+logbox sessions --commit e30d239
 ```
 
-### Session stats
+## Session stats
 
 ```bash
-# Latest session
-logbox stats
-
-# Specific session
+logbox stats                     # latest session
 logbox stats <session-id>
 ```
 
-### Compare sessions
+## MCP server
 
-See what changed between two server runs:
+logbox includes an MCP server so AI coding agents automatically discover the log tools:
 
 ```bash
-logbox compare <session-a> <session-b>
-logbox compare <session-a> <session-b> --pattern "error"
+# Add to Claude Code
+claude mcp add logbox -- logbox serve
 ```
+
+Or add to your Claude Code settings manually:
+
+```json
+{
+  "mcpServers": {
+    "logbox": {
+      "command": "logbox",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+This exposes 4 tools to the agent:
+- **list_logs** — browse consecutive log lines in a time range
+- **search_logs** — find lines matching a keyword
+- **list_sessions** — list recorded sessions
+- **session_stats** — get stats for a session
 
 ## How it works
 
 - Logs are stored in `~/.logbox/logs.db` (SQLite with WAL mode)
-- Each `logbox collect` invocation creates a session tagged with the current git branch and repo
+- Each `logbox collect` invocation creates a session tagged with git repo, branch, and commit SHA
 - The collector batches writes (every 100 lines or 500ms) for efficiency
 - All query commands support `--json` for structured output
-
-## Use with Claude Code
-
-Claude Code can query your logs directly via the CLI:
-
-```bash
-# Claude runs this via Bash tool
-logbox search "ERROR" --last 1h --json
-```
 
 ## License
 

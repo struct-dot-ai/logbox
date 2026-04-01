@@ -1,5 +1,4 @@
 use chrono::{DateTime, Duration, Local, Utc};
-use regex::Regex;
 use rusqlite::{params, Connection};
 use serde::Serialize;
 use std::path::PathBuf;
@@ -60,29 +59,12 @@ pub struct Stats {
     pub last_log: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct CompareResult {
-    pub session_a: CompareSessionInfo,
-    pub session_b: CompareSessionInfo,
-    pub only_in_a: i64,
-    pub only_in_b: i64,
-    pub common_lines: i64,
-}
-
-#[derive(Debug, Serialize)]
-pub struct CompareSessionInfo {
-    pub id: String,
-    pub branch: Option<String>,
-    pub total_lines: i64,
-}
-
 pub struct SearchFilters {
     pub branch: Option<String>,
     pub session_id: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
     pub limit: u32,
-    pub is_regex: bool,
 }
 
 pub struct LogsFilters {
@@ -238,24 +220,13 @@ pub fn list_logs(conn: &Connection, filters: &LogsFilters) -> Vec<LogEntry> {
 }
 
 pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) -> Vec<LogEntry> {
-    let re = if filters.is_regex {
-        match Regex::new(pattern) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("Invalid regex pattern: {}", e);
-                return vec![];
-            }
-        }
-    } else {
-        // Plain text search — escape to literal regex
-        Regex::new(&regex::escape(pattern)).unwrap()
-    };
-
     let mut sql = String::from(
         "SELECT l.id, l.session_id, l.timestamp, l.line, s.branch \
-         FROM logs l JOIN sessions s ON l.session_id = s.id WHERE 1=1",
+         FROM logs l JOIN sessions s ON l.session_id = s.id WHERE l.line LIKE ?",
     );
-    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
+    let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
+        Box::new(format!("%{}%", pattern)),
+    ];
 
     if let Some(ref branch) = filters.branch {
         sql.push_str(" AND s.branch = ?");
@@ -279,8 +250,7 @@ pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) ->
     }
 
     sql.push_str(" ORDER BY l.timestamp DESC");
-    // Fetch more than limit since we filter by regex in Rust
-    sql.push_str(&format!(" LIMIT {}", filters.limit * 10));
+    sql.push_str(&format!(" LIMIT {}", filters.limit));
 
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
 
@@ -292,33 +262,21 @@ pub fn search_logs(conn: &Connection, pattern: &str, filters: &SearchFilters) ->
         }
     };
 
-    let rows = stmt
-        .query_map(params_refs.as_slice(), |row| {
-            Ok(LogEntry {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                timestamp: row.get(2)?,
-                line: row.get(3)?,
-                branch: row.get(4)?,
-            })
+    stmt.query_map(params_refs.as_slice(), |row| {
+        Ok(LogEntry {
+            id: row.get(0)?,
+            session_id: row.get(1)?,
+            timestamp: row.get(2)?,
+            line: row.get(3)?,
+            branch: row.get(4)?,
         })
-        .unwrap_or_else(|e| {
-            eprintln!("Query error: {}", e);
-            panic!("Query failed");
-        });
-
-    let mut results = vec![];
-    for row in rows {
-        if let Ok(entry) = row {
-            if re.is_match(&entry.line) {
-                results.push(entry);
-                if results.len() >= filters.limit as usize {
-                    break;
-                }
-            }
-        }
-    }
-    results
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("Query error: {}", e);
+        panic!("Query failed");
+    })
+    .filter_map(|r| r.ok())
+    .collect()
 }
 
 pub fn list_sessions(conn: &Connection, filters: &SessionFilters) -> Vec<Session> {
@@ -426,65 +384,3 @@ pub fn session_stats(conn: &Connection, session_id: Option<&str>) -> Option<Stat
     })
 }
 
-pub fn compare_sessions(
-    conn: &Connection,
-    session_a: &str,
-    session_b: &str,
-    pattern: Option<&str>,
-    is_regex: bool,
-) -> Option<CompareResult> {
-    let re = pattern.map(|p| {
-        if is_regex {
-            Regex::new(p).unwrap_or_else(|_| Regex::new(&regex::escape(p)).unwrap())
-        } else {
-            Regex::new(&regex::escape(p)).unwrap()
-        }
-    });
-
-    let get_info = |sid: &str| -> Option<CompareSessionInfo> {
-        let (branch, total): (Option<String>, i64) = conn
-            .query_row(
-                "SELECT s.branch, COUNT(l.id) FROM sessions s \
-                 LEFT JOIN logs l ON l.session_id = s.id \
-                 WHERE s.id = ?1 GROUP BY s.id",
-                params![sid],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .ok()?;
-        Some(CompareSessionInfo {
-            id: sid.to_string(),
-            branch,
-            total_lines: total,
-        })
-    };
-
-    let info_a = get_info(session_a)?;
-    let info_b = get_info(session_b)?;
-
-    // Get lines from each session
-    let get_lines = |sid: &str| -> Vec<String> {
-        let mut stmt = conn
-            .prepare("SELECT line FROM logs WHERE session_id = ?1 ORDER BY timestamp")
-            .unwrap();
-        stmt.query_map(params![sid], |row| row.get::<_, String>(0))
-            .unwrap()
-            .filter_map(|r| r.ok())
-            .filter(|line| re.as_ref().map_or(true, |r| r.is_match(line)))
-            .collect()
-    };
-
-    let lines_a: std::collections::HashSet<String> = get_lines(session_a).into_iter().collect();
-    let lines_b: std::collections::HashSet<String> = get_lines(session_b).into_iter().collect();
-
-    let common = lines_a.intersection(&lines_b).count() as i64;
-    let only_a = lines_a.len() as i64 - common;
-    let only_b = lines_b.len() as i64 - common;
-
-    Some(CompareResult {
-        session_a: info_a,
-        session_b: info_b,
-        only_in_a: only_a,
-        only_in_b: only_b,
-        common_lines: common,
-    })
-}

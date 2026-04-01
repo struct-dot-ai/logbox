@@ -6,7 +6,7 @@ mod server;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "logbox", about = "Persist dev server logs to SQLite so AI coding agents can search and query them. Pipe your dev server through `logbox collect`, then agents can use search/sessions/stats/compare to investigate issues.")]
+#[command(name = "logbox", about = "Persist dev server logs to SQLite so AI coding agents can search and query them. Pipe your dev server through `logbox collect`, then agents can use search/sessions/stats to investigate issues.")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -14,7 +14,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Collect logs from stdin into the database
+    /// Capture logs from stdin into the database (pipe your dev server through this)
     Collect {
         /// Working directory to associate with this session
         #[arg(long)]
@@ -48,7 +48,7 @@ enum Commands {
         json: bool,
     },
 
-    /// Show recent logs (newest first, paginate with --offset)
+    /// Browse consecutive log lines (newest first). Use --since/--until for time ranges, --offset to paginate
     Logs {
         /// Filter to a specific session ID
         #[arg(long)]
@@ -79,14 +79,10 @@ enum Commands {
         json: bool,
     },
 
-    /// Search logs by keyword or pattern
+    /// Find log lines matching a keyword (case-insensitive substring match)
     Search {
-        /// Text to search for (plain text by default, use --regex for regex)
+        /// Keyword to search for in log lines
         pattern: String,
-
-        /// Treat pattern as a regular expression
-        #[arg(long)]
-        regex: bool,
 
         /// Filter to logs from the last duration (e.g. "1h", "30m", "2d")
         #[arg(long)]
@@ -109,31 +105,10 @@ enum Commands {
         json: bool,
     },
 
-    /// Show stats for a session
+    /// Show summary stats for a session (line count, time range, git info)
     Stats {
         /// Session ID (defaults to latest session)
         session_id: Option<String>,
-
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Compare logs between two sessions
-    Compare {
-        /// First session ID
-        session_a: String,
-
-        /// Second session ID
-        session_b: String,
-
-        /// Filter to lines matching this pattern
-        #[arg(long)]
-        pattern: Option<String>,
-
-        /// Treat pattern as a regular expression
-        #[arg(long)]
-        regex: bool,
 
         /// Output as JSON
         #[arg(long)]
@@ -243,7 +218,6 @@ fn main() {
 
         Commands::Search {
             pattern,
-            regex,
             last,
             session,
             branch,
@@ -260,7 +234,6 @@ fn main() {
                     since: last,
                     until: None,
                     limit,
-                    is_regex: regex,
                 },
             );
 
@@ -318,44 +291,6 @@ fn main() {
                 }
                 None => {
                     eprintln!("No session found.");
-                    std::process::exit(1);
-                }
-            }
-        }
-
-        Commands::Compare {
-            session_a,
-            session_b,
-            pattern,
-            regex,
-            json,
-        } => {
-            let conn = db::open_db().expect("Failed to open database");
-            match db::compare_sessions(&conn, &session_a, &session_b, pattern.as_deref(), regex) {
-                Some(result) => {
-                    if json {
-                        println!("{}", serde_json::to_string_pretty(&result).unwrap());
-                    } else {
-                        println!(
-                            "Session A: {} ({} lines, branch: {})",
-                            &result.session_a.id[..8],
-                            result.session_a.total_lines,
-                            result.session_a.branch.as_deref().unwrap_or("none"),
-                        );
-                        println!(
-                            "Session B: {} ({} lines, branch: {})",
-                            &result.session_b.id[..8],
-                            result.session_b.total_lines,
-                            result.session_b.branch.as_deref().unwrap_or("none"),
-                        );
-                        println!();
-                        println!("Only in A:    {}", result.only_in_a);
-                        println!("Only in B:    {}", result.only_in_b);
-                        println!("Common lines: {}", result.common_lines);
-                    }
-                }
-                None => {
-                    eprintln!("One or both sessions not found.");
                     std::process::exit(1);
                 }
             }
