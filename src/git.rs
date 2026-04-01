@@ -46,24 +46,8 @@ pub fn repo_name() -> Option<String> {
 
     if output.status.success() {
         let url = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let clean = url.trim_end_matches(".git");
-        // Parse repo name from URL patterns:
-        // git@github.com:org/repo.git -> org/repo
-        // https://github.com/org/repo.git -> org/repo
-        let name = if clean.contains("://") {
-            // HTTPS URL: take last two path segments (org/repo)
-            let parts: Vec<&str> = clean.rsplitn(3, '/').collect();
-            if parts.len() >= 2 {
-                Some(format!("{}/{}", parts[1], parts[0]))
-            } else {
-                None
-            }
-        } else {
-            // SSH URL: git@host:org/repo
-            clean.rsplit_once(':').map(|(_, path)| path.to_string())
-        };
-        if name.is_some() {
-            return name;
+        if let Some(name) = parse_repo_url(&url) {
+            return Some(name);
         }
     }
 
@@ -74,6 +58,23 @@ pub fn repo_name() -> Option<String> {
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or(root)
     })
+}
+
+/// Parse org/repo from a git remote URL.
+pub fn parse_repo_url(url: &str) -> Option<String> {
+    let clean = url.trim_end_matches(".git");
+    if clean.contains("://") {
+        // HTTPS URL: take last two path segments (org/repo)
+        let parts: Vec<&str> = clean.rsplitn(3, '/').collect();
+        if parts.len() >= 2 {
+            Some(format!("{}/{}", parts[1], parts[0]))
+        } else {
+            None
+        }
+    } else {
+        // SSH URL: git@host:org/repo
+        clean.rsplit_once(':').map(|(_, path)| path.to_string())
+    }
 }
 
 pub fn repo_root() -> Option<String> {
@@ -91,5 +92,40 @@ pub fn repo_root() -> Option<String> {
         }
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ssh_url() {
+        assert_eq!(parse_repo_url("git@github.com:org/repo.git"), Some("org/repo".into()));
+    }
+
+    #[test]
+    fn test_parse_ssh_url_no_suffix() {
+        assert_eq!(parse_repo_url("git@github.com:org/repo"), Some("org/repo".into()));
+    }
+
+    #[test]
+    fn test_parse_https_url() {
+        assert_eq!(parse_repo_url("https://github.com/org/repo.git"), Some("org/repo".into()));
+    }
+
+    #[test]
+    fn test_parse_https_url_no_suffix() {
+        assert_eq!(parse_repo_url("https://github.com/org/repo"), Some("org/repo".into()));
+    }
+
+    #[test]
+    fn test_parse_gitlab_ssh() {
+        assert_eq!(parse_repo_url("git@gitlab.com:group/project.git"), Some("group/project".into()));
+    }
+
+    #[test]
+    fn test_parse_gitlab_https() {
+        assert_eq!(parse_repo_url("https://gitlab.com/group/project.git"), Some("group/project".into()));
     }
 }
