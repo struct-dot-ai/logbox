@@ -31,11 +31,10 @@ jobs:
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-llvm-cov
-      - run: cargo llvm-cov --all-features --lcov --output-path lcov.info
-      - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        with:
-          files: lcov.info
-          fail_ci_if_error: false
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+      - name: Check coverage
+        run: |
+          cargo llvm-cov --all-features --json --output-path coverage.json
+          cargo llvm-cov report
+          COVERAGE=$(cat coverage.json | python3 -c "import sys,json; d=json.load(sys.stdin); t=d['data'][0]['totals']['lines']; print(f\"{t['percent']:.1f}\")")
+          echo "Line coverage: ${COVERAGE}%"
+          python3 -c "assert float('${COVERAGE}') >= 75.0, f'Coverage {${COVERAGE}}% is below 75% threshold'"
