@@ -298,13 +298,22 @@ jobs:
           mkdir npm-pkg
           tar xzf logbox-npm-package.tar.gz -C npm-pkg
           cd npm-pkg/package
-          # Rename to scoped package
-          node -e "const p=require('./package.json'); p.name='@struct-ai/logbox'; require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2))"
+          # Rename to scoped package and fix repository field
+          node -e "
+            const p = require('./package.json');
+            p.name = '@struct-ai/logbox';
+            p.repository = { type: 'git', url: 'git+https://github.com/struct-dot-ai/logbox.git' };
+            require('fs').writeFileSync('package.json', JSON.stringify(p, null, 2));
+          "
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+        env:
+          NODE_AUTH_TOKEN: ""
       - name: Publish to npm
+        env:
+          NODE_AUTH_TOKEN: ""
         run: |
           cd npm-pkg/package
           npm publish --provenance --access public
