@@ -1,6 +1,6 @@
 [package]
 name = "logbox"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 description = "Persist dev server logs to SQLite so AI coding agents can search and query them"
 license = "MIT"
