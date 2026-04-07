@@ -153,6 +153,10 @@ Tools:
 - The collector batches writes (every 100 lines or 500ms) for efficiency
 - All query commands support `--json` for structured output
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, testing, and PR guidelines.
+
 ## License
 
 MIT
