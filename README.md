@@ -1,12 +1,12 @@
 # logbox
 
-Capture dev server logs so coding agents can search them directly.
+Give coding agents direct access to local server logs.
 
-When your agent asks "what's in the logs?", you end up scrolling through your terminal, copying log lines, and pasting them into the chat.
+When your coding agent tries to test your server live, you end up scrolling through your terminal, copying log lines, and pasting them into the chat.
 
-Use logbox to pipe your dev server logs through it and query them directly via MCP. No more copy-pasting.
+Use logbox to pipe your dev server logs through it and query them directly via MCP.
 
-Previous dev sessions can also be searched, tagged with commit sha and branch.
+It manages log storage and search so it works across multiple services, previous dev sessions, and different branches.
 
 ## Quickstart
 
